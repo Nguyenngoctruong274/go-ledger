@@ -1,0 +1,51 @@
+package config
+
+import (
+	"testing"
+	"time"
+)
+
+func TestLoad(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    Config
+		wantErr bool
+	}{
+		{
+			name: "defaults",
+			env:  map[string]string{},
+			want: Config{HTTPAddr: ":8080", ShutdownTimeout: 15 * time.Second, LogLevel: "info"},
+		},
+		{
+			name: "overrides",
+			env: map[string]string{
+				"LEDGER_HTTP_ADDR":        ":9090",
+				"LEDGER_DATABASE_URL":     "postgres://localhost/ledger",
+				"LEDGER_SHUTDOWN_TIMEOUT": "5s",
+				"LEDGER_LOG_LEVEL":        "debug",
+			},
+			want: Config{
+				HTTPAddr:        ":9090",
+				DatabaseURL:     "postgres://localhost/ledger",
+				ShutdownTimeout: 5 * time.Second,
+				LogLevel:        "debug",
+			},
+		},
+		{name: "bad duration", env: map[string]string{"LEDGER_SHUTDOWN_TIMEOUT": "soon"}, wantErr: true},
+		{name: "non-positive duration", env: map[string]string{"LEDGER_SHUTDOWN_TIMEOUT": "0s"}, wantErr: true},
+		{name: "bad log level", env: map[string]string{"LEDGER_LOG_LEVEL": "loud"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := load(func(k string) string { return tt.env[k] })
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("load() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("load() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
