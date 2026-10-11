@@ -59,18 +59,35 @@ t, err := ledger.NewTransfer("ride-42", "VND",
 
 The zero-sum invariant is covered by table tests and a fuzz test (`go test -fuzz=FuzzNewTransfer ./internal/ledger`).
 
+## Storage
+
+Schema lives in [`internal/postgres/migrations`](internal/postgres/migrations) and is embedded in the binary. `ledgerd` applies pending migrations on startup under a `pg_advisory_lock`, so several replicas can start at once; each migration runs in its own transaction.
+
+The database enforces the ledger rules a second time, independently of the Go code:
+
+| Safeguard | How |
+|---|---|
+| Transfers balance | Deferred constraint trigger: at commit, the entries of every touched transfer must sum to 0 |
+| No overdraft on customer accounts | `CHECK (allow_negative OR balance >= 0)` |
+| Ledger is append-only | Trigger rejects `UPDATE` / `DELETE` on `entries` |
+| One entry per account per transfer | `UNIQUE (transfer_id, account_id)` |
+| Fast statements | Index `(account_id, id DESC)` + keyset pagination |
+
+Driver: `database/sql` with [`lib/pq`](https://github.com/lib/pq).
+
 ## Quick start
 
 ```bash
-make up      # start Postgres
-make run     # start ledgerd on :8080
+make up       # start Postgres
+make run      # start ledgerd on :8080 (applies migrations)
 curl localhost:8080/healthz
+make test-db  # run tests, including the PostgreSQL ones
 ```
 
 | Variable | Default | Description |
 |---|---|---|
 | `LEDGER_HTTP_ADDR` | `:8080` | Listen address |
-| `LEDGER_DATABASE_URL` | – | Postgres connection string |
+| `LEDGER_DATABASE_URL` | – (required) | Postgres connection string |
 | `LEDGER_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
 | `LEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
@@ -78,7 +95,7 @@ curl localhost:8080/healthz
 
 - [x] Day 1: project skeleton, config, health check, graceful shutdown, CI
 - [x] Day 2: domain model (accounts, transfers, entries) + invariant tests
-- [ ] Day 3: migrations + Postgres store
+- [x] Day 3: migrations + Postgres store
 - [ ] Day 4: transactional transfers with ordered row locks
 - [ ] Day 5: idempotency keys
 - [ ] Day 6: HTTP API + error mapping

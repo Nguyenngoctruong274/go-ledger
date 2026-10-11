@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
 BIN := bin/ledgerd
+export LEDGER_DATABASE_URL ?= postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable
 
 .PHONY: help
 help: ## Show this help
@@ -16,6 +17,10 @@ run: ## Run ledgerd locally
 .PHONY: test
 test: ## Run unit tests with the race detector
 	go test -race -count=1 ./...
+
+.PHONY: test-db
+test-db: ## Run all tests, including PostgreSQL ones (needs `make up`)
+	LEDGER_TEST_DATABASE_URL=$(LEDGER_DATABASE_URL) go test -race -count=1 ./...
 
 .PHONY: cover
 cover: ## Run tests and open a coverage report

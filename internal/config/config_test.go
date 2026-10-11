@@ -14,8 +14,13 @@ func TestLoad(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			env:  map[string]string{},
-			want: Config{HTTPAddr: ":8080", ShutdownTimeout: 15 * time.Second, LogLevel: "info"},
+			env:  map[string]string{"LEDGER_DATABASE_URL": "postgres://localhost/ledger"},
+			want: Config{
+				HTTPAddr:        ":8080",
+				DatabaseURL:     "postgres://localhost/ledger",
+				ShutdownTimeout: 15 * time.Second,
+				LogLevel:        "info",
+			},
 		},
 		{
 			name: "overrides",
@@ -32,9 +37,10 @@ func TestLoad(t *testing.T) {
 				LogLevel:        "debug",
 			},
 		},
-		{name: "bad duration", env: map[string]string{"LEDGER_SHUTDOWN_TIMEOUT": "soon"}, wantErr: true},
-		{name: "non-positive duration", env: map[string]string{"LEDGER_SHUTDOWN_TIMEOUT": "0s"}, wantErr: true},
-		{name: "bad log level", env: map[string]string{"LEDGER_LOG_LEVEL": "loud"}, wantErr: true},
+		{name: "missing database url", env: map[string]string{}, wantErr: true},
+		{name: "bad duration", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_SHUTDOWN_TIMEOUT": "soon"}, wantErr: true},
+		{name: "non-positive duration", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_SHUTDOWN_TIMEOUT": "0s"}, wantErr: true},
+		{name: "bad log level", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_LOG_LEVEL": "loud"}, wantErr: true},
 	}
 
 	for _, tt := range tests {

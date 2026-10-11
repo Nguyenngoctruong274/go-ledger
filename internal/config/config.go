@@ -34,6 +34,10 @@ func load(getenv func(string) string) (Config, error) {
 
 	var errs []error
 
+	if cfg.DatabaseURL == "" {
+		errs = append(errs, errors.New("LEDGER_DATABASE_URL: required"))
+	}
+
 	if raw := getenv("LEDGER_SHUTDOWN_TIMEOUT"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		switch {

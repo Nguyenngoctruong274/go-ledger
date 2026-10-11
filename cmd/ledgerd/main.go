@@ -14,6 +14,7 @@ import (
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/config"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/httpapi"
+	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
 )
 
 func main() {
@@ -37,6 +38,20 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	startCtx, cancelStart := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelStart()
+
+	db, err := postgres.Open(startCtx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := postgres.Migrate(startCtx, db); err != nil {
+		return err
+	}
+	logger.Info("database ready")
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
