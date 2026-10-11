@@ -39,6 +39,26 @@ flowchart LR
 
 Packages are organized by responsibility, not by layer. The `ledger` package owns the business rules and defines the `Store` interface it needs; `postgres` implements it.
 
+## Domain model
+
+| Type | Rule |
+|---|---|
+| `Amount` | Signed `int64` minor units. Negative debits an account, positive credits it. Additions are overflow-checked. |
+| `Transfer` | Built only through `NewTransfer` / `NewPayment`: ≥ 2 entries, non-zero amounts, each account once, one currency, **sum = 0**. Fields are unexported, so a balanced transfer cannot be unbalanced later. |
+| `Account` | Holds currency and `AllowNegative` (true only for system accounts such as funding or settlement). |
+| `Plan` | Pure check of a transfer against current balances: unknown account, currency mismatch, insufficient funds. Returns the new balances without mutating anything; the store applies them inside the DB transaction. |
+
+```go
+// Ride payment: rider pays 30,000 VND, driver gets 24,000, platform keeps 6,000.
+t, err := ledger.NewTransfer("ride-42", "VND",
+    ledger.Entry{AccountID: "rider", Amount: -30_000},
+    ledger.Entry{AccountID: "driver", Amount: 24_000},
+    ledger.Entry{AccountID: "platform-fee", Amount: 6_000},
+)
+```
+
+The zero-sum invariant is covered by table tests and a fuzz test (`go test -fuzz=FuzzNewTransfer ./internal/ledger`).
+
 ## Quick start
 
 ```bash
@@ -57,7 +77,7 @@ curl localhost:8080/healthz
 ## Roadmap
 
 - [x] Day 1: project skeleton, config, health check, graceful shutdown, CI
-- [ ] Day 2: domain model (accounts, transfers, entries) + invariant tests
+- [x] Day 2: domain model (accounts, transfers, entries) + invariant tests
 - [ ] Day 3: migrations + Postgres store
 - [ ] Day 4: transactional transfers with ordered row locks
 - [ ] Day 5: idempotency keys
