@@ -75,6 +75,26 @@ The database enforces the ledger rules a second time, independently of the Go co
 
 Driver: `database/sql` with [`lib/pq`](https://github.com/lib/pq).
 
+## Posting a transfer
+
+`Store.PostTransfer` applies a validated transfer in a single database transaction:
+
+```mermaid
+sequenceDiagram
+    participant S as Store.PostTransfer
+    participant DB as PostgreSQL
+    S->>DB: BEGIN
+    S->>DB: SELECT … FROM accounts WHERE id = ANY($ids) ORDER BY id FOR UPDATE
+    Note over S,DB: rows locked in ascending id order
+    S->>S: ledger.Plan(transfer, accounts, balances)
+    S->>DB: INSERT transfer, INSERT entries (unnest), UPDATE balances (unnest)
+    S->>DB: COMMIT (deferred zero-sum trigger runs here)
+```
+
+**Why the lock order matters.** If one request moves money A→B while another moves B→A, and each locks its source account first, each ends up waiting for the other: a deadlock, and Postgres aborts one of them. Locking every account in the same global order (ascending id) turns that into a short queue. `TestPostTransferOppositeDirectionsDoNotDeadlock` runs 100 opposite-direction transfers concurrently; with unordered locking it fails with `pq: deadlock detected`, with ordered locking all of them succeed.
+
+**Concurrency test.** `TestPostTransferConcurrentInvariants` runs 320 random transfers across 8 workers, many of them larger than the sender's balance, and then checks that money is conserved, no customer wallet is negative, and each stored balance equals the sum of its entries.
+
 ## Quick start
 
 ```bash
@@ -96,7 +116,7 @@ make test-db  # run tests, including the PostgreSQL ones
 - [x] Day 1: project skeleton, config, health check, graceful shutdown, CI
 - [x] Day 2: domain model (accounts, transfers, entries) + invariant tests
 - [x] Day 3: migrations + Postgres store
-- [ ] Day 4: transactional transfers with ordered row locks
+- [x] Day 4: transactional transfers with ordered row locks
 - [ ] Day 5: idempotency keys
 - [ ] Day 6: HTTP API + error mapping
 - [ ] Day 7: transactional outbox relay
