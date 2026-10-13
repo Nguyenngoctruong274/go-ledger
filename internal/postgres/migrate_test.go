@@ -1,6 +1,10 @@
 package postgres
 
 import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -74,5 +78,71 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 	}
 	if ms[0].version != 1 || !strings.Contains(ms[0].sql, "CREATE TABLE accounts") {
 		t.Fatalf("unexpected first migration: %s", ms[0].name)
+	}
+}
+
+// TestMigration0002BackfillsRunningBalances applies 0001, writes entries the
+// old way (no balance_after), then applies 0002 and checks the backfill.
+func TestMigration0002BackfillsRunningBalances(t *testing.T) {
+	if os.Getenv("LEDGER_TEST_DATABASE_URL") == "" {
+		t.Skip("LEDGER_TEST_DATABASE_URL not set; skipping PostgreSQL tests")
+	}
+	db := openEmptyTestDB(t)
+	ctx := context.Background()
+
+	first, err := fs.ReadFile(migrationFS, "migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, db, fstest.MapFS{"migrations/0001_init.sql": {Data: first}}); err != nil {
+		t.Fatal(err)
+	}
+
+	stmts := []string{
+		`INSERT INTO accounts (id, currency, allow_negative) VALUES ('f', 'VND', true), ('w', 'VND', false)`,
+		`BEGIN`,
+		`INSERT INTO transfers (id, currency) VALUES ('t1', 'VND')`,
+		`INSERT INTO entries (transfer_id, account_id, amount) VALUES ('t1', 'f', -500), ('t1', 'w', 500)`,
+		`INSERT INTO transfers (id, currency) VALUES ('t2', 'VND')`,
+		`INSERT INTO entries (transfer_id, account_id, amount) VALUES ('t2', 'w', -200), ('t2', 'f', 200)`,
+		`COMMIT`,
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range stmts {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_ = conn.Close()
+
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT transfer_id, account_id, balance_after FROM entries ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := []string{"t1/f/-500", "t1/w/500", "t2/w/300", "t2/f/-300"}
+	var got []string
+	for rows.Next() {
+		var tr, acc string
+		var after int64
+		if err := rows.Scan(&tr, &acc, &after); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s/%s/%d", tr, acc, after))
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("balance_after = %v, want %v", got, want)
+	}
+
+	// The append-only guard must be active again after the migration.
+	if _, err := db.ExecContext(ctx, `UPDATE entries SET amount = 1 WHERE transfer_id = 't1'`); err == nil {
+		t.Fatal("entries are writable after migration 0002")
 	}
 }

@@ -21,6 +21,18 @@ import (
 // LEDGER_TEST_DATABASE_URL points at a disposable PostgreSQL database.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+	db := openEmptyTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// openEmptyTestDB is openTestDB without migrations.
+func openEmptyTestDB(t *testing.T) *sql.DB {
+	t.Helper()
 	base := os.Getenv("LEDGER_TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("LEDGER_TEST_DATABASE_URL not set; skipping PostgreSQL tests")
@@ -57,10 +69,6 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatal(err)
-	}
 	return db
 }
 
@@ -75,8 +83,12 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("schema_migrations has %d rows, want 1", n)
+	all, err := loadMigrations(migrationFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(all) {
+		t.Fatalf("schema_migrations has %d rows, want %d", n, len(all))
 	}
 }
 
@@ -120,8 +132,11 @@ func insertTransfer(ctx context.Context, db *sql.DB, id string, entries map[stri
 		return err
 	}
 	for acc, amount := range entries {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO entries (transfer_id, account_id, amount) VALUES ($1, $2, $3)`, id, acc, amount); err != nil {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO entries (transfer_id, account_id, amount, balance_after)
+			VALUES ($1, $2, $3::bigint,
+			        (SELECT COALESCE(SUM(amount), 0) FROM entries WHERE account_id = $2) + $3::bigint)`,
+			id, acc, amount); err != nil {
 			return err
 		}
 	}
@@ -220,6 +235,9 @@ func TestStatementPagination(t *testing.T) {
 	}
 	if len(page2) != 1 || page2[0].TransferID != "t1" || page2[0].Amount != 1000 {
 		t.Fatalf("page 2 = %+v, want t1 (+1000)", page2)
+	}
+	if page1[0].BalanceAfter != 6000 || page2[0].BalanceAfter != 1000 {
+		t.Fatalf("running balances = %d / %d, want 6000 / 1000", page1[0].BalanceAfter, page2[0].BalanceAfter)
 	}
 
 	if _, err := store.Statement(ctx, "wallet", 0, 0); err == nil {

@@ -62,12 +62,13 @@ func TestPostTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	postings, err := store.PostTransfer(ctx, ride)
+	receipt, err := store.PostTransfer(ctx, ride)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(postings) != 3 || postings[0].NewBalance != 20_000 {
-		t.Fatalf("postings = %+v", postings)
+	if receipt.Replayed || len(receipt.Entries) != 3 || receipt.Entries[0].BalanceAfter != 20_000 ||
+		receipt.Entries[1].BalanceAfter != 24_000 || receipt.CreatedAt.IsZero() {
+		t.Fatalf("receipt = %+v", receipt)
 	}
 
 	for id, want := range map[ledger.AccountID]ledger.Amount{
@@ -109,7 +110,7 @@ func TestPostTransferRejectsAndWritesNothing(t *testing.T) {
 		{"insufficient funds", mustPayment(t, "t1", "alice", "bob", 101), ledger.ErrInsufficientFunds},
 		{"unknown account", mustPayment(t, "t2", "alice", "carol", 1), ledger.ErrAccountNotFound},
 		{"currency mismatch", mustPayment(t, "t3", "alice", "usd-wallet", 1), ledger.ErrCurrencyMismatch},
-		{"duplicate transfer id", mustPayment(t, "seed", "alice", "bob", 1), ErrTransferExists},
+		{"id reused for another request", mustPayment(t, "seed", "alice", "bob", 1), ErrIdempotencyConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,5 +262,116 @@ func TestPostTransferConcurrentInvariants(t *testing.T) {
 	}
 	if mismatched != 0 {
 		t.Errorf("%d accounts have a balance that differs from the sum of their entries", mismatched)
+	}
+}
+
+func TestPostTransferIsIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+	createAccounts(t, store,
+		ledger.Account{ID: "funding", Currency: "VND", AllowNegative: true},
+		ledger.Account{ID: "alice", Currency: "VND"},
+		ledger.Account{ID: "bob", Currency: "VND"},
+	)
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "seed", "funding", "alice", 100)); err != nil {
+		t.Fatal(err)
+	}
+
+	pay := mustPayment(t, "pay-1", "alice", "bob", 70)
+	first, err := store.PostTransfer(ctx, pay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed {
+		t.Fatal("first post reported as replay")
+	}
+
+	// The retry arrives after alice's balance (30) is too low to pay 70 again.
+	// It must still report the original success, not insufficient funds.
+	second, err := store.PostTransfer(ctx, pay)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !second.Replayed || second.CreatedAt != first.CreatedAt || len(second.Entries) != len(first.Entries) {
+		t.Fatalf("retry receipt = %+v, want replay of %+v", second, first)
+	}
+	for i := range first.Entries {
+		if first.Entries[i] != second.Entries[i] {
+			t.Fatalf("entry %d: replay %+v != original %+v", i, second.Entries[i], first.Entries[i])
+		}
+	}
+
+	// Same id and same movement, listed in a different order: still a retry.
+	reordered, err := ledger.NewTransfer("pay-1", "VND",
+		ledger.Entry{AccountID: "bob", Amount: 70}, ledger.Entry{AccountID: "alice", Amount: -70})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := store.PostTransfer(ctx, reordered); err != nil || !r.Replayed {
+		t.Fatalf("reordered retry: receipt %+v, error %v", r, err)
+	}
+
+	if got := balanceOf(t, store, "alice"); got != 30 {
+		t.Fatalf("alice balance = %d, want 30 (charged once)", got)
+	}
+	if got := balanceOf(t, store, "bob"); got != 70 {
+		t.Fatalf("bob balance = %d, want 70", got)
+	}
+}
+
+// TestPostTransferConcurrentRetries fires the same request from many
+// goroutines at once, like a client that times out and retries aggressively.
+// Exactly one must post; all others must replay; money moves once.
+func TestPostTransferConcurrentRetries(t *testing.T) {
+	store := NewStore(openTestDB(t))
+	ctx := context.Background()
+	createAccounts(t, store,
+		ledger.Account{ID: "funding", Currency: "VND", AllowNegative: true},
+		ledger.Account{ID: "alice", Currency: "VND"},
+		ledger.Account{ID: "bob", Currency: "VND"},
+	)
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "seed", "funding", "alice", 100)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 100 can be paid once; a second real charge would fail for funds.
+	pay := mustPayment(t, "pay-once", "alice", "bob", 100)
+
+	const n = 20
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		posted   int
+		replayed int
+		errs     []error
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := store.PostTransfer(ctx, pay)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				errs = append(errs, err)
+			case r.Replayed:
+				replayed++
+			default:
+				posted++
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		t.Fatalf("%d requests failed, first: %v", len(errs), errs[0])
+	}
+	if posted != 1 || replayed != n-1 {
+		t.Fatalf("posted=%d replayed=%d, want 1 and %d", posted, replayed, n-1)
+	}
+	if a, b := balanceOf(t, store, "alice"), balanceOf(t, store, "bob"); a != 0 || b != 100 {
+		t.Fatalf("balances alice=%d bob=%d, want 0 and 100", a, b)
 	}
 }

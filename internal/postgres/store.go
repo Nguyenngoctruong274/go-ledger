@@ -84,10 +84,11 @@ func (s *Store) GetAccount(ctx context.Context, id ledger.AccountID) (ledger.Acc
 
 // StatementLine is one entry as seen from an account statement.
 type StatementLine struct {
-	EntryID    int64
-	TransferID ledger.TransferID
-	Amount     ledger.Amount
-	CreatedAt  time.Time
+	EntryID      int64
+	TransferID   ledger.TransferID
+	Amount       ledger.Amount
+	BalanceAfter ledger.Amount
+	CreatedAt    time.Time
 }
 
 // Statement returns up to limit entries for an account, newest first,
@@ -102,7 +103,7 @@ func (s *Store) Statement(ctx context.Context, id ledger.AccountID, beforeID int
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, transfer_id, amount, created_at
+		SELECT id, transfer_id, amount, balance_after, created_at
 		FROM entries
 		WHERE account_id = $1 AND id < $2
 		ORDER BY id DESC
@@ -115,7 +116,7 @@ func (s *Store) Statement(ctx context.Context, id ledger.AccountID, beforeID int
 	lines := make([]StatementLine, 0, limit)
 	for rows.Next() {
 		var l StatementLine
-		if err := rows.Scan(&l.EntryID, &l.TransferID, &l.Amount, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.EntryID, &l.TransferID, &l.Amount, &l.BalanceAfter, &l.CreatedAt); err != nil {
 			return nil, fmt.Errorf("statement %s: scan: %w", id, err)
 		}
 		lines = append(lines, l)

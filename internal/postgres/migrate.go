@@ -29,7 +29,11 @@ type migration struct {
 // Each migration runs in its own transaction together with the row that
 // records it, so a failed migration leaves no partial state behind.
 func Migrate(ctx context.Context, db *sql.DB) error {
-	migrations, err := loadMigrations(migrationFS)
+	return migrate(ctx, db, migrationFS)
+}
+
+func migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+	migrations, err := loadMigrations(fsys)
 	if err != nil {
 		return err
 	}
