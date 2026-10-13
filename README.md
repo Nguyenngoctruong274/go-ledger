@@ -84,16 +84,33 @@ sequenceDiagram
     participant S as Store.PostTransfer
     participant DB as PostgreSQL
     S->>DB: BEGIN
+    S->>DB: INSERT INTO transfers (id, request_hash) — claims the id
     S->>DB: SELECT … FROM accounts WHERE id = ANY($ids) ORDER BY id FOR UPDATE
     Note over S,DB: rows locked in ascending id order
     S->>S: ledger.Plan(transfer, accounts, balances)
-    S->>DB: INSERT transfer, INSERT entries (unnest), UPDATE balances (unnest)
+    S->>DB: INSERT entries (unnest, with balance_after), UPDATE balances (unnest)
     S->>DB: COMMIT (deferred zero-sum trigger runs here)
 ```
 
 **Why the lock order matters.** If one request moves money A→B while another moves B→A, and each locks its source account first, each ends up waiting for the other: a deadlock, and Postgres aborts one of them. Locking every account in the same global order (ascending id) turns that into a short queue. `TestPostTransferOppositeDirectionsDoNotDeadlock` runs 100 opposite-direction transfers concurrently; with unordered locking it fails with `pq: deadlock detected`, with ordered locking all of them succeed.
 
 **Concurrency test.** `TestPostTransferConcurrentInvariants` runs 320 random transfers across 8 workers, many of them larger than the sender's balance, and then checks that money is conserved, no customer wallet is negative, and each stored balance equals the sum of its entries.
+
+## Idempotency
+
+Clients retry: a mobile app times out, a queue redelivers, a user taps twice. The transfer id is the idempotency key, and `PostTransfer` makes retries safe:
+
+| Request | Result |
+|---|---|
+| New id | Posted. Receipt with `Replayed = false`. |
+| Same id, same request | Nothing moves. The original receipt comes back with `Replayed = true`, even if the balance has changed since. |
+| Same id, different request | `ErrIdempotencyConflict` (will map to HTTP 422). |
+
+"Same request" is decided by `Transfer.Fingerprint()`: a SHA-256 over the currency and the sorted `(account, amount)` entries, stored in `transfers.request_hash`. Entry order and the id do not affect it.
+
+Two identical requests arriving at the same moment are handled by the order of operations inside the transaction: the transfer row is inserted **before** funds are checked. The second request blocks on the primary key, gets a unique violation once the first commits, and replays its receipt. If funds were checked first, the second request would see the balance the first one just spent and wrongly report insufficient funds. `TestPostTransferConcurrentRetries` fires 20 identical requests at once and requires exactly one post and 19 replays; with the steps swapped it fails.
+
+Each entry also stores `balance_after`, so replays and account statements show running balances without recomputing history. Migration `0002` backfills it for existing rows with a window function.
 
 ## Quick start
 
@@ -117,7 +134,7 @@ make test-db  # run tests, including the PostgreSQL ones
 - [x] Day 2: domain model (accounts, transfers, entries) + invariant tests
 - [x] Day 3: migrations + Postgres store
 - [x] Day 4: transactional transfers with ordered row locks
-- [ ] Day 5: idempotency keys
+- [x] Day 5: idempotency keys
 - [ ] Day 6: HTTP API + error mapping
 - [ ] Day 7: transactional outbox relay
 - [ ] Day 8: integration tests with Testcontainers
