@@ -2,17 +2,41 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/Nguyenngoctruong274/go-ledger/internal/ledger"
 )
 
+// Ledger is what the HTTP layer needs from storage. It is defined here, by
+// its consumer, so handlers can be tested with an in-memory fake and the
+// storage package stays free of HTTP concerns.
+type Ledger interface {
+	CreateAccount(ctx context.Context, acc ledger.Account) error
+	GetAccount(ctx context.Context, id ledger.AccountID) (ledger.Account, ledger.Amount, error)
+	PostTransfer(ctx context.Context, t ledger.Transfer) (ledger.Receipt, error)
+	Statement(ctx context.Context, id ledger.AccountID, beforeID int64, limit int) ([]ledger.StatementLine, error)
+}
+
 // NewHandler builds the root HTTP handler with all routes and middleware.
-func NewHandler(logger *slog.Logger) http.Handler {
+func NewHandler(logger *slog.Logger, l Ledger) http.Handler {
+	a := &api{ledger: l, logger: logger}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("POST /v1/accounts", a.createAccount)
+	mux.HandleFunc("GET /v1/accounts/{id}", a.getAccount)
+	mux.HandleFunc("GET /v1/accounts/{id}/entries", a.listEntries)
+	mux.HandleFunc("POST /v1/transfers", a.postTransfer)
 	return logRequests(logger, mux)
+}
+
+type api struct {
+	ledger Ledger
+	logger *slog.Logger
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {

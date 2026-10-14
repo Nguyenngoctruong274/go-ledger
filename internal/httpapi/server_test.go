@@ -8,8 +8,10 @@ import (
 	"testing"
 )
 
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 func TestHealthz(t *testing.T) {
-	h := NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(discardLogger(), newFakeLedger())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -26,7 +28,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestHealthzRejectsWrongMethod(t *testing.T) {
-	h := NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(discardLogger(), newFakeLedger())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
