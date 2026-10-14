@@ -112,12 +112,54 @@ Two identical requests arriving at the same moment are handled by the order of o
 
 Each entry also stores `balance_after`, so replays and account statements show running balances without recomputing history. Migration `0002` backfills it for existing rows with a window function.
 
+## HTTP API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/accounts` | Create an account `{id, currency, allow_negative}` |
+| `GET` | `/v1/accounts/{id}` | Account with current balance |
+| `GET` | `/v1/accounts/{id}/entries?limit=&before=` | Statement, newest first, keyset-paginated via `next_before` |
+| `POST` | `/v1/transfers` | Post a transfer. **Requires `Idempotency-Key`**, which becomes the transfer id |
+| `GET` | `/healthz` | Liveness |
+
+```bash
+curl -X POST localhost:8080/v1/transfers \
+  -H 'Idempotency-Key: ride-42' \
+  -d '{"currency":"VND","entries":[
+        {"account_id":"rider","amount":-30000},
+        {"account_id":"driver","amount":24000},
+        {"account_id":"platform-fee","amount":6000}]}'
+```
+
+A simple payment can use the shorthand `{"currency":"VND","from":"rider","to":"driver","amount":30000}`.
+
+The first call returns `201 Created` with the receipt (each entry with its `balance_after`). Repeating the same request returns `200 OK`, the identical body and `Idempotent-Replayed: true`.
+
+Errors share one shape, with a stable `code` for programs:
+
+```json
+{"error": {"code": "insufficient_funds", "message": "transfer ride-2: insufficient funds: account rider has 20000, needs 999999"}}
+```
+
+| Status | `code` |
+|---|---|
+| 400 | `invalid_request`, `invalid_currency`, `unbalanced_transfer`, `too_few_entries`, `zero_amount`, `non_positive_amount`, `duplicate_account`, `amount_overflow`, `missing_id` |
+| 402 | `insufficient_funds` |
+| 404 | `account_not_found` |
+| 409 | `account_exists` |
+| 422 | `idempotency_conflict`, `currency_mismatch` |
+| 500 | `internal`: details are logged, never returned |
+
+Requests are limited to 1 MiB, must be a single JSON object and may not contain unknown fields. Amounts are integers in minor units; clients in JavaScript should treat values above 2^53 as strings. There is no authentication yet, so messages include balances; put the service behind an authenticating gateway.
+
+The handlers depend on a small `Ledger` interface defined in `httpapi`, so they are tested against an in-memory fake (`go test ./internal/httpapi`), including the full error table.
+
 ## Quick start
 
 ```bash
 make up       # start Postgres
 make run      # start ledgerd on :8080 (applies migrations)
-curl localhost:8080/healthz
+curl -X POST localhost:8080/v1/accounts -d '{"id":"alice","currency":"VND"}'
 make test-db  # run tests, including the PostgreSQL ones
 ```
 
@@ -135,7 +177,7 @@ make test-db  # run tests, including the PostgreSQL ones
 - [x] Day 3: migrations + Postgres store
 - [x] Day 4: transactional transfers with ordered row locks
 - [x] Day 5: idempotency keys
-- [ ] Day 6: HTTP API + error mapping
+- [x] Day 6: HTTP API + error mapping
 - [ ] Day 7: transactional outbox relay
 - [ ] Day 8: integration tests with Testcontainers
 - [ ] Day 9: observability (slog, Prometheus metrics, readiness)
