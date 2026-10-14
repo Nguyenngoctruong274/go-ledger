@@ -110,7 +110,7 @@ func TestPostTransferRejectsAndWritesNothing(t *testing.T) {
 		{"insufficient funds", mustPayment(t, "t1", "alice", "bob", 101), ledger.ErrInsufficientFunds},
 		{"unknown account", mustPayment(t, "t2", "alice", "carol", 1), ledger.ErrAccountNotFound},
 		{"currency mismatch", mustPayment(t, "t3", "alice", "usd-wallet", 1), ledger.ErrCurrencyMismatch},
-		{"id reused for another request", mustPayment(t, "seed", "alice", "bob", 1), ErrIdempotencyConflict},
+		{"id reused for another request", mustPayment(t, "seed", "alice", "bob", 1), ledger.ErrIdempotencyConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

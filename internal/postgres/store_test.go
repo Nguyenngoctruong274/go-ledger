@@ -108,7 +108,7 @@ func TestCreateAndGetAccount(t *testing.T) {
 		t.Fatalf("got %+v balance %d, want %+v balance 0", got, balance, want)
 	}
 
-	if err := store.CreateAccount(ctx, want); !errors.Is(err, ErrAccountExists) {
+	if err := store.CreateAccount(ctx, want); !errors.Is(err, ledger.ErrAccountExists) {
 		t.Fatalf("duplicate create: error = %v, want ErrAccountExists", err)
 	}
 	if _, _, err := store.GetAccount(ctx, "missing"); !errors.Is(err, ledger.ErrAccountNotFound) {

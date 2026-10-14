@@ -13,9 +13,6 @@ import (
 	"github.com/Nguyenngoctruong274/go-ledger/internal/ledger"
 )
 
-// ErrAccountExists is returned when creating an account whose id is taken.
-var ErrAccountExists = errors.New("account already exists")
-
 // Open connects to PostgreSQL and verifies the connection.
 func Open(ctx context.Context, url string) (*sql.DB, error) {
 	db, err := sql.Open("postgres", url)
@@ -56,7 +53,7 @@ func (s *Store) CreateAccount(ctx context.Context, acc ledger.Account) error {
 		`INSERT INTO accounts (id, currency, allow_negative) VALUES ($1, $2, $3)`,
 		acc.ID, acc.Currency, acc.AllowNegative)
 	if isUniqueViolation(err) {
-		return fmt.Errorf("create account %s: %w", acc.ID, ErrAccountExists)
+		return fmt.Errorf("create account %s: %w", acc.ID, ledger.ErrAccountExists)
 	}
 	if err != nil {
 		return fmt.Errorf("create account %s: %w", acc.ID, err)
@@ -82,19 +79,10 @@ func (s *Store) GetAccount(ctx context.Context, id ledger.AccountID) (ledger.Acc
 	return acc, ledger.Amount(balance), nil
 }
 
-// StatementLine is one entry as seen from an account statement.
-type StatementLine struct {
-	EntryID      int64
-	TransferID   ledger.TransferID
-	Amount       ledger.Amount
-	BalanceAfter ledger.Amount
-	CreatedAt    time.Time
-}
-
 // Statement returns up to limit entries for an account, newest first,
 // starting strictly before the entry id beforeID (0 means from the newest).
 // Keyset pagination keeps every page an index range scan.
-func (s *Store) Statement(ctx context.Context, id ledger.AccountID, beforeID int64, limit int) ([]StatementLine, error) {
+func (s *Store) Statement(ctx context.Context, id ledger.AccountID, beforeID int64, limit int) ([]ledger.StatementLine, error) {
 	if limit <= 0 || limit > 500 {
 		return nil, fmt.Errorf("statement %s: limit %d out of range 1..500", id, limit)
 	}
@@ -113,9 +101,9 @@ func (s *Store) Statement(ctx context.Context, id ledger.AccountID, beforeID int
 	}
 	defer rows.Close()
 
-	lines := make([]StatementLine, 0, limit)
+	lines := make([]ledger.StatementLine, 0, limit)
 	for rows.Next() {
-		var l StatementLine
+		var l ledger.StatementLine
 		if err := rows.Scan(&l.EntryID, &l.TransferID, &l.Amount, &l.BalanceAfter, &l.CreatedAt); err != nil {
 			return nil, fmt.Errorf("statement %s: scan: %w", id, err)
 		}
