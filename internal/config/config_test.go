@@ -37,6 +37,22 @@ func TestLoad(t *testing.T) {
 				LogLevel:        "debug",
 			},
 		},
+		{
+			name: "webhook",
+			env: map[string]string{
+				"LEDGER_DATABASE_URL":          "x",
+				"LEDGER_OUTBOX_WEBHOOK_URL":    "https://hooks.example.com/ledger",
+				"LEDGER_OUTBOX_WEBHOOK_SECRET": "0123456789abcdef",
+			},
+			want: Config{
+				HTTPAddr: ":8080", DatabaseURL: "x", ShutdownTimeout: 15 * time.Second, LogLevel: "info",
+				OutboxWebhookURL: "https://hooks.example.com/ledger", OutboxWebhookSecret: "0123456789abcdef",
+			},
+		},
+		{name: "webhook without secret", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_OUTBOX_WEBHOOK_URL": "https://h.example.com"}, wantErr: true},
+		{name: "webhook short secret", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_OUTBOX_WEBHOOK_URL": "https://h.example.com", "LEDGER_OUTBOX_WEBHOOK_SECRET": "short"}, wantErr: true},
+		{name: "webhook relative url", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_OUTBOX_WEBHOOK_URL": "/hook", "LEDGER_OUTBOX_WEBHOOK_SECRET": "0123456789abcdef"}, wantErr: true},
+		{name: "webhook ftp url", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_OUTBOX_WEBHOOK_URL": "ftp://h.example.com", "LEDGER_OUTBOX_WEBHOOK_SECRET": "0123456789abcdef"}, wantErr: true},
 		{name: "missing database url", env: map[string]string{}, wantErr: true},
 		{name: "bad duration", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_SHUTDOWN_TIMEOUT": "soon"}, wantErr: true},
 		{name: "non-positive duration", env: map[string]string{"LEDGER_DATABASE_URL": "x", "LEDGER_SHUTDOWN_TIMEOUT": "0s"}, wantErr: true},

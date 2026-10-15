@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -15,6 +16,10 @@ type Config struct {
 	DatabaseURL     string
 	ShutdownTimeout time.Duration
 	LogLevel        string
+
+	// OutboxWebhookURL receives outbox events when set; otherwise they are logged.
+	OutboxWebhookURL    string
+	OutboxWebhookSecret string
 }
 
 // Load reads configuration from environment variables, applying defaults
@@ -30,6 +35,9 @@ func load(getenv func(string) string) (Config, error) {
 		DatabaseURL:     getenv("LEDGER_DATABASE_URL"),
 		ShutdownTimeout: 15 * time.Second,
 		LogLevel:        valueOr(getenv("LEDGER_LOG_LEVEL"), "info"),
+
+		OutboxWebhookURL:    getenv("LEDGER_OUTBOX_WEBHOOK_URL"),
+		OutboxWebhookSecret: getenv("LEDGER_OUTBOX_WEBHOOK_SECRET"),
 	}
 
 	var errs []error
@@ -47,6 +55,16 @@ func load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("LEDGER_SHUTDOWN_TIMEOUT: must be positive"))
 		default:
 			cfg.ShutdownTimeout = d
+		}
+	}
+
+	if cfg.OutboxWebhookURL != "" {
+		u, err := url.Parse(cfg.OutboxWebhookURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, errors.New("LEDGER_OUTBOX_WEBHOOK_URL: must be an absolute http(s) URL"))
+		}
+		if len(cfg.OutboxWebhookSecret) < 16 {
+			errs = append(errs, errors.New("LEDGER_OUTBOX_WEBHOOK_SECRET: required with a webhook URL, at least 16 bytes"))
 		}
 	}
 

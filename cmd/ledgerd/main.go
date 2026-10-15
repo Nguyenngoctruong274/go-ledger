@@ -14,6 +14,7 @@ import (
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/config"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/httpapi"
+	"github.com/Nguyenngoctruong274/go-ledger/internal/outbox"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
 )
 
@@ -53,6 +54,20 @@ func run() error {
 	}
 	logger.Info("database ready")
 
+	// The relay runs until shutdown. It is stopped and awaited before the
+	// database handle is closed (defers run in reverse order).
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		_ = outbox.NewRelay(db, newPublisher(cfg, logger), logger, outbox.Options{}).Run(relayCtx)
+	}()
+	defer func() {
+		stopRelay()
+		<-relayDone
+		logger.Info("outbox relay stopped")
+	}()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           httpapi.NewHandler(logger, postgres.NewStore(db)),
@@ -86,4 +101,15 @@ func run() error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// newPublisher picks where outbox events go: a signed webhook when one is
+// configured, otherwise the log (useful locally, never loses an event).
+func newPublisher(cfg config.Config, logger *slog.Logger) outbox.Publisher {
+	if cfg.OutboxWebhookURL == "" {
+		logger.Info("outbox: no webhook configured, events go to the log")
+		return outbox.LogPublisher{Logger: logger}
+	}
+	logger.Info("outbox: publishing to webhook", slog.String("url", cfg.OutboxWebhookURL))
+	return outbox.WebhookPublisher{URL: cfg.OutboxWebhookURL, Secret: []byte(cfg.OutboxWebhookSecret)}
 }
