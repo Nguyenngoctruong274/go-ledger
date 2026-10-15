@@ -34,7 +34,7 @@ flowchart LR
     SVC -->|Store interface| PG[(internal/postgres)]
     PG --> DB[(PostgreSQL)]
     DB --> OB[internal/outbox relay]
-    OB -->|events| MQ[[Message broker]]
+    OB -->|signed webhook| MQ[[Consumers]]
 ```
 
 Packages are organized by responsibility, not by layer. The `ledger` package owns the business rules and defines the `Store` interface it needs; `postgres` implements it.
@@ -154,6 +154,37 @@ Requests are limited to 1 MiB, must be a single JSON object and may not contain 
 
 The handlers depend on a small `Ledger` interface defined in `httpapi`, so they are tested against an in-memory fake (`go test ./internal/httpapi`), including the full error table.
 
+## Events (transactional outbox)
+
+Every posted transfer emits a `transfer.posted` event. Writing it directly to a broker from the request would either lose events (crash after commit, before publish) or announce transfers that rolled back (publish before commit). Instead the event is inserted into the `outbox` table **in the same transaction** as the entries, so it exists if and only if the money moved. Replays and rejected transfers write nothing.
+
+A relay goroutine inside `ledgerd` then publishes pending rows:
+
+```mermaid
+flowchart LR
+    TX[PostTransfer tx] -->|INSERT entries + outbox row| DB[(outbox)]
+    R[Relay] -->|pg_try_advisory_xact_lock| DB
+    R -->|oldest due rows, id order| P{Publisher}
+    P -->|2xx| OK[published_at = now]
+    P -->|error| RETRY[attempts+1, next_attempt_at = now + backoff]
+```
+
+| Property | How |
+|---|---|
+| At-least-once | A row is marked published only after the publisher confirms. A crash in between republishes it, so consumers dedupe on `X-Ledger-Message-Id` or `transfer_id`. |
+| Ordered per account | One relay publishes at a time (advisory lock, safe with many replicas) and stops at the first failing or not-yet-due row. Transfers on a shared account get outbox ids in commit order because the row is written after the account lock. |
+| Retries | Exponential backoff from 1 s to 5 min; `attempts` and `last_error` stay on the row for alerting. A message that keeps failing blocks those behind it by design. |
+
+Publishers: a **signed webhook** (`X-Ledger-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`, plus `X-Ledger-Timestamp`, `X-Ledger-Topic`, `X-Ledger-Message-Id`; any non-2xx is retried) or, when no URL is configured, the log. A Kafka publisher only needs to implement `outbox.Publisher`.
+
+```json
+{"transfer_id":"topup-1","currency":"VND","posted_at":"2026-10-15T08:31:42.951499Z",
+ "entries":[{"account_id":"funding","amount":-50000,"balance_after":-50000},
+            {"account_id":"rider","amount":50000,"balance_after":50000}]}
+```
+
+Tests cover the atomic write, in-order delivery, backoff without overtaking, four concurrent relays publishing 300 messages exactly once and in order, graceful stop, and webhook signing, status handling and timeouts.
+
 ## Quick start
 
 ```bash
@@ -169,6 +200,8 @@ make test-db  # run tests, including the PostgreSQL ones
 | `LEDGER_DATABASE_URL` | – (required) | Postgres connection string |
 | `LEDGER_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
 | `LEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LEDGER_OUTBOX_WEBHOOK_URL` | – | Where outbox events are POSTed. Unset: events are logged |
+| `LEDGER_OUTBOX_WEBHOOK_SECRET` | – | HMAC key for webhook signatures (≥ 16 bytes, required with a URL) |
 
 ## Roadmap
 
@@ -178,7 +211,7 @@ make test-db  # run tests, including the PostgreSQL ones
 - [x] Day 4: transactional transfers with ordered row locks
 - [x] Day 5: idempotency keys
 - [x] Day 6: HTTP API + error mapping
-- [ ] Day 7: transactional outbox relay
+- [x] Day 7: transactional outbox relay
 - [ ] Day 8: integration tests with Testcontainers
 - [ ] Day 9: observability (slog, Prometheus metrics, readiness)
 - [ ] Day 10: Docker Compose stack, benchmarks, final docs
