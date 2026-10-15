@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -32,7 +33,8 @@ var errDuplicateTransfer = errors.New("duplicate transfer id")
 //     opposite directions queue behind each other instead of deadlocking;
 //  2. re-checks the transfer against the locked balances with ledger.Plan
 //     (funds, currency, existence);
-//  3. inserts the transfer and its entries, and moves the balances.
+//  3. inserts the entries, moves the balances and writes a
+//     transfer.posted event to the outbox.
 func (s *Store) PostTransfer(ctx context.Context, t ledger.Transfer) (ledger.Receipt, error) {
 	fp := t.Fingerprint()
 
@@ -170,6 +172,18 @@ func (s *Store) post(ctx context.Context, t ledger.Transfer, fp [32]byte) (_ led
 		WHERE a.id = d.account_id`,
 		pq.Array(accIDs), pq.Array(amounts)); err != nil {
 		return ledger.Receipt{}, fmt.Errorf("post transfer %s: update balances: %w", t.ID(), err)
+	}
+
+	// The event is part of the same transaction: it exists if and only if
+	// the money moved. The outbox relay publishes it afterwards.
+	payload, err := json.Marshal(newTransferPostedEvent(receipt))
+	if err != nil {
+		return ledger.Receipt{}, fmt.Errorf("post transfer %s: encode event: %w", t.ID(), err)
+	}
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3)`,
+		TopicTransferPosted, t.ID(), payload); err != nil {
+		return ledger.Receipt{}, fmt.Errorf("post transfer %s: write outbox: %w", t.ID(), err)
 	}
 
 	if err = tx.Commit(); err != nil {

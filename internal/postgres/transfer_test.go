@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -373,5 +374,58 @@ func TestPostTransferConcurrentRetries(t *testing.T) {
 	}
 	if a, b := balanceOf(t, store, "alice"), balanceOf(t, store, "bob"); a != 0 || b != 100 {
 		t.Fatalf("balances alice=%d bob=%d, want 0 and 100", a, b)
+	}
+}
+
+func TestPostTransferWritesOutboxEventAtomically(t *testing.T) {
+	db := openTestDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+	createAccounts(t, store,
+		ledger.Account{ID: "funding", Currency: "VND", AllowNegative: true},
+		ledger.Account{ID: "alice", Currency: "VND"},
+		ledger.Account{ID: "bob", Currency: "VND"},
+	)
+
+	pay := mustPayment(t, "evt-1", "funding", "alice", 500)
+	if _, err := store.PostTransfer(ctx, pay); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PostTransfer(ctx, pay); err != nil { // replay
+		t.Fatal(err)
+	}
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "evt-2", "alice", "bob", 10_000)); !errors.Is(err, ledger.ErrInsufficientFunds) {
+		t.Fatalf("expected insufficient funds, got %v", err)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT topic, key, payload FROM outbox ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var events []TransferPostedEvent
+	for rows.Next() {
+		var topic, key string
+		var payload []byte
+		if err := rows.Scan(&topic, &key, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if topic != TopicTransferPosted || key != "evt-1" {
+			t.Fatalf("unexpected outbox row %s/%s", topic, key)
+		}
+		var ev TransferPostedEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, ev)
+	}
+	// One event for the real post; none for the replay or the rejected transfer.
+	if len(events) != 1 {
+		t.Fatalf("got %d outbox events, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.TransferID != "evt-1" || ev.Currency != "VND" || len(ev.Entries) != 2 ||
+		ev.Entries[1].AccountID != "alice" || ev.Entries[1].BalanceAfter != 500 || ev.PostedAt.IsZero() {
+		t.Fatalf("event = %+v", ev)
 	}
 }
