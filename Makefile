@@ -22,6 +22,10 @@ test: ## Run unit tests with the race detector
 test-db: ## Run all tests, including PostgreSQL ones (needs `make up`)
 	LEDGER_TEST_DATABASE_URL=$(LEDGER_DATABASE_URL) go test -race -count=1 ./...
 
+.PHONY: test-integration
+test-integration: ## Run everything including the end-to-end suite (needs `make up`)
+	LEDGER_TEST_DATABASE_URL=$(LEDGER_DATABASE_URL) go test -race -count=1 -tags integration ./...
+
 .PHONY: cover
 cover: ## Run tests and open a coverage report
 	go test -race -coverprofile=coverage.out ./...

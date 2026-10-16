@@ -104,11 +104,14 @@ Clients retry: a mobile app times out, a queue redelivers, a user taps twice. Th
 |---|---|
 | New id | Posted. Receipt with `Replayed = false`. |
 | Same id, same request | Nothing moves. The original receipt comes back with `Replayed = true`, even if the balance has changed since. |
-| Same id, different request | `ErrIdempotencyConflict` (will map to HTTP 422). |
+| Same id, after a refusal | The same refusal again (e.g. 402 `insufficient_funds`) with `Idempotent-Replayed: true`, even if funds have arrived since. Use a new id to try again. |
+| Same id, different request | `ErrIdempotencyConflict` (HTTP 422). |
 
 "Same request" is decided by `Transfer.Fingerprint()`: a SHA-256 over the currency and the sorted `(account, amount)` entries, stored in `transfers.request_hash`. Entry order and the id do not affect it.
 
 Two identical requests arriving at the same moment are handled by the order of operations inside the transaction: the transfer row is inserted **before** funds are checked. The second request blocks on the primary key, gets a unique violation once the first commits, and replays its receipt. If funds were checked first, the second request would see the balance the first one just spent and wrongly report insufficient funds. `TestPostTransferConcurrentRetries` fires 20 identical requests at once and requires exactly one post and 19 replays; with the steps swapped it fails.
+
+Refusals are recorded too (`transfers.status = 'rejected'`, migration `0004`): a transfer id gets exactly one outcome. The end-to-end suite caught why this matters. When two copies of a request raced while other payments were crediting the payer, one copy could be refused for funds and the other then succeed, so a client whose retry was told "insufficient funds" had in fact been charged. `TestConcurrentDuplicatesAgreeWhileFundsArrive` reproduces it at the store level (it fails on the previous code) and now passes.
 
 Each entry also stores `balance_after`, so replays and account statements show running balances without recomputing history. Migration `0002` backfills it for existing rows with a window function.
 
@@ -185,13 +188,35 @@ Publishers: a **signed webhook** (`X-Ledger-Signature: sha256=HMAC(secret, "<tim
 
 Tests cover the atomic write, in-order delivery, backoff without overtaking, four concurrent relays publishing 300 messages exactly once and in order, graceful stop, and webhook signing, status handling and timeouts.
 
+## Testing
+
+| Layer | Where | Needs |
+|---|---|---|
+| Domain rules, fuzzing | `internal/ledger` | nothing |
+| HTTP handlers and error table | `internal/httpapi` (in-memory fake) | nothing |
+| Store, migrations, locking, idempotency | `internal/postgres` | PostgreSQL |
+| Outbox relay and publishers | `internal/outbox` | PostgreSQL |
+| **End to end** | `test/integration` (`-tags integration`) | PostgreSQL |
+
+The end-to-end suite starts the real HTTP handlers, the real store, the outbox relay and a webhook receiver that checks every signature, then drives them only through HTTP:
+
+- a ride payment checked through balances, a paginated statement and the delivered event;
+- retries, conflicts and refusals as a client sees them (status, `Idempotent-Replayed`, identical bodies, no extra events);
+- a webhook outage: the receiver fails 5 times, and all events still arrive once, in order, with the failures recorded;
+- 8 concurrent clients sending 200 random payments, **each request twice at the same moment**; afterwards money is conserved, every statement's running balance adds up, each posted transfer has exactly one event, and every wallet's events report its balances in statement order.
+
+Every test gets its own PostgreSQL schema (`internal/testdb`), so tests run in parallel against one server. In CI that server is a `postgres:16` service container; locally `make up && make test-integration`. Tests that need a database skip themselves when `LEDGER_TEST_DATABASE_URL` is unset.
+
+The roadmap originally named Testcontainers. The CI service container already gives each run a clean, disposable PostgreSQL, and per-test schemas give isolation within a run, so the suite does not need the Docker API.
+
 ## Quick start
 
 ```bash
 make up       # start Postgres
 make run      # start ledgerd on :8080 (applies migrations)
 curl -X POST localhost:8080/v1/accounts -d '{"id":"alice","currency":"VND"}'
-make test-db  # run tests, including the PostgreSQL ones
+make test-db           # unit + PostgreSQL tests
+make test-integration  # everything, including the end-to-end suite
 ```
 
 | Variable | Default | Description |
@@ -212,7 +237,7 @@ make test-db  # run tests, including the PostgreSQL ones
 - [x] Day 5: idempotency keys
 - [x] Day 6: HTTP API + error mapping
 - [x] Day 7: transactional outbox relay
-- [ ] Day 8: integration tests with Testcontainers
+- [x] Day 8: end-to-end integration tests (real HTTP + PostgreSQL + outbox + webhook)
 - [ ] Day 9: observability (slog, Prometheus metrics, readiness)
 - [ ] Day 10: Docker Compose stack, benchmarks, final docs
 
