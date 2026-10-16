@@ -2,75 +2,19 @@ package postgres
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
-	"net/url"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/lib/pq"
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/ledger"
+	"github.com/Nguyenngoctruong274/go-ledger/internal/testdb"
 )
 
-// openTestDB returns a database handle scoped to a fresh schema with all
-// migrations applied. Tests that need it are skipped unless
-// LEDGER_TEST_DATABASE_URL points at a disposable PostgreSQL database.
-func openTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db := openEmptyTestDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
+func openTestDB(t *testing.T) *sql.DB { return testdb.New(t, Migrate) }
 
-// openEmptyTestDB is openTestDB without migrations.
-func openEmptyTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	base := os.Getenv("LEDGER_TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("LEDGER_TEST_DATABASE_URL not set; skipping PostgreSQL tests")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	admin, err := Open(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-
-	buf := make([]byte, 6)
-	_, _ = rand.Read(buf)
-	schema := "test_" + hex.EncodeToString(buf)
-	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schema)); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schema)+" CASCADE")
-	})
-
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-
-	db, err := Open(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
+func openEmptyTestDB(t *testing.T) *sql.DB { return testdb.NewEmpty(t) }
 
 func TestMigrateIsIdempotent(t *testing.T) {
 	db := openTestDB(t)

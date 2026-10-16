@@ -2,65 +2,22 @@ package outbox
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
-
 	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
+	"github.com/Nguyenngoctruong274/go-ledger/internal/testdb"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// openTestDB returns a migrated database scoped to a fresh schema, or skips
-// the test when LEDGER_TEST_DATABASE_URL is not set.
-func openTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	base := os.Getenv("LEDGER_TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("LEDGER_TEST_DATABASE_URL not set; skipping PostgreSQL tests")
-	}
-	ctx := context.Background()
-	admin, err := postgres.Open(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-
-	buf := make([]byte, 6)
-	_, _ = rand.Read(buf)
-	schema := "test_" + hex.EncodeToString(buf)
-	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schema)); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schema)+" CASCADE")
-	})
-
-	u, _ := url.Parse(base)
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	db, err := postgres.Open(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := postgres.Migrate(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
+func openTestDB(t *testing.T) *sql.DB { return testdb.New(t, postgres.Migrate) }
 
 func enqueue(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
