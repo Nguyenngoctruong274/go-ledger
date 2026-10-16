@@ -61,6 +61,9 @@ func statusFor(err error) (int, string) {
 // replaced by a generic message so internals never leak to clients.
 func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code := statusFor(err)
+	if errors.Is(err, ledger.ErrReplayed) {
+		w.Header().Set("Idempotent-Replayed", "true")
+	}
 	msg := err.Error()
 	if status == http.StatusInternalServerError {
 		a.logger.ErrorContext(r.Context(), "request failed",

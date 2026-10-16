@@ -128,13 +128,16 @@ func TestPostTransferRejectsAndWritesNothing(t *testing.T) {
 	if got := balanceOf(t, store, "bob"); got != 0 {
 		t.Fatalf("bob balance = %d, want 0", got)
 	}
-	var transfers, entries int
-	if err := db.QueryRowContext(ctx,
-		`SELECT (SELECT count(*) FROM transfers), (SELECT count(*) FROM entries)`).Scan(&transfers, &entries); err != nil {
+	// Refusals are recorded as the outcome of their id, but move no money.
+	var posted, rejected, entries int
+	if err := db.QueryRowContext(ctx, `
+		SELECT (SELECT count(*) FROM transfers WHERE status = 'posted'),
+		       (SELECT count(*) FROM transfers WHERE status = 'rejected'),
+		       (SELECT count(*) FROM entries)`).Scan(&posted, &rejected, &entries); err != nil {
 		t.Fatal(err)
 	}
-	if transfers != 1 || entries != 2 {
-		t.Fatalf("found %d transfers / %d entries, want only the seed (1 / 2)", transfers, entries)
+	if posted != 1 || rejected != 3 || entries != 2 {
+		t.Fatalf("posted=%d rejected=%d entries=%d, want 1 / 3 / 2", posted, rejected, entries)
 	}
 }
 
@@ -427,5 +430,95 @@ func TestPostTransferWritesOutboxEventAtomically(t *testing.T) {
 	if ev.TransferID != "evt-1" || ev.Currency != "VND" || len(ev.Entries) != 2 ||
 		ev.Entries[1].AccountID != "alice" || ev.Entries[1].BalanceAfter != 500 || ev.PostedAt.IsZero() {
 		t.Fatalf("event = %+v", ev)
+	}
+}
+
+// TestRefusalIsTheFinalOutcomeOfAnID pins the rule the end-to-end suite
+// found missing: once an id is refused, a later attempt with the same id is
+// refused again, even if the funds have arrived in between. Otherwise a
+// client whose retry was told "insufficient funds" could still be charged by
+// the original request.
+func TestRefusalIsTheFinalOutcomeOfAnID(t *testing.T) {
+	store := NewStore(openTestDB(t))
+	ctx := context.Background()
+	createAccounts(t, store,
+		ledger.Account{ID: "funding", Currency: "VND", AllowNegative: true},
+		ledger.Account{ID: "alice", Currency: "VND"},
+		ledger.Account{ID: "bob", Currency: "VND"},
+	)
+
+	pay := mustPayment(t, "pay-late", "alice", "bob", 100)
+	_, err := store.PostTransfer(ctx, pay)
+	if !errors.Is(err, ledger.ErrInsufficientFunds) || errors.Is(err, ledger.ErrReplayed) {
+		t.Fatalf("first attempt: %v, want a fresh insufficient-funds refusal", err)
+	}
+
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "topup", "funding", "alice", 1_000)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.PostTransfer(ctx, pay)
+	if !errors.Is(err, ledger.ErrInsufficientFunds) || !errors.Is(err, ledger.ErrReplayed) {
+		t.Fatalf("retry after top-up: %v, want the replayed refusal", err)
+	}
+	if got := balanceOf(t, store, "alice"); got != 1_000 {
+		t.Fatalf("alice balance = %d, want 1000 (the refused payment must never post)", got)
+	}
+
+	// A different request under the refused id is still a conflict.
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "pay-late", "alice", "bob", 50)); !errors.Is(err, ledger.ErrIdempotencyConflict) {
+		t.Fatalf("different request: %v, want conflict", err)
+	}
+	// A new id is evaluated normally.
+	if _, err := store.PostTransfer(ctx, mustPayment(t, "pay-late-2", "alice", "bob", 100)); err != nil {
+		t.Fatalf("new id: %v", err)
+	}
+}
+
+// TestConcurrentDuplicatesAgreeWhileFundsArrive reproduces the race at the
+// store level: copies of the same payment race with top-ups of the payer.
+// Whatever the interleaving, all copies of one id must report the same thing.
+func TestConcurrentDuplicatesAgreeWhileFundsArrive(t *testing.T) {
+	store := NewStore(openTestDB(t))
+	ctx := context.Background()
+	createAccounts(t, store,
+		ledger.Account{ID: "funding", Currency: "VND", AllowNegative: true},
+		ledger.Account{ID: "alice", Currency: "VND"},
+		ledger.Account{ID: "bob", Currency: "VND"},
+	)
+
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		pay := mustPayment(t, fmt.Sprintf("p%d", i), "alice", "bob", 100)
+		topup := mustPayment(t, fmt.Sprintf("top%d", i), "funding", "alice", 100)
+
+		var wg sync.WaitGroup
+		results := make([]error, 3)
+		for k := 0; k < 3; k++ {
+			wg.Add(1)
+			go func(k int) { defer wg.Done(); _, results[k] = store.PostTransfer(ctx, pay) }(k)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.PostTransfer(ctx, topup); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Wait()
+
+		refused := 0
+		for _, err := range results {
+			switch {
+			case err == nil:
+			case errors.Is(err, ledger.ErrInsufficientFunds):
+				refused++
+			default:
+				t.Fatalf("round %d: unexpected error %v", i, err)
+			}
+		}
+		if refused != 0 && refused != len(results) {
+			t.Fatalf("round %d: %d of %d copies refused, the rest posted", i, refused, len(results))
+		}
 	}
 }

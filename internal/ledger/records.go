@@ -11,6 +11,10 @@ import (
 var (
 	ErrAccountExists       = errors.New("account already exists")
 	ErrIdempotencyConflict = errors.New("transfer id already used for a different request")
+
+	// ErrReplayed accompanies an error that was not produced now but
+	// returned from an earlier attempt with the same transfer id.
+	ErrReplayed = errors.New("replayed result")
 )
 
 // PostedEntry is one leg of a posted transfer and the balance it produced.

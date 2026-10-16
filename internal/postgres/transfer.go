@@ -20,10 +20,13 @@ var errDuplicateTransfer = errors.New("duplicate transfer id")
 
 // PostTransfer atomically and idempotently applies a validated transfer.
 //
-// The transfer id is the idempotency key. Posting the same request twice
-// returns the original receipt with Replayed set and moves money only
-// once, even if the accounts have changed since or both requests arrive at
-// the same moment. Reusing an id for a different request returns
+// The transfer id is the idempotency key and gets exactly one outcome.
+// Posting the same request twice returns the original receipt with
+// Replayed set and moves money only once, even if the accounts have changed
+// since or both requests arrive at the same moment. If the first attempt was
+// refused (insufficient funds, unknown account, currency mismatch), every
+// later attempt with that id gets the same refusal wrapped with
+// ledger.ErrReplayed. Reusing an id for a different request returns
 // ledger.ErrIdempotencyConflict.
 //
 // The write itself happens in one database transaction that:
@@ -61,10 +64,14 @@ func (s *Store) PostTransfer(ctx context.Context, t ledger.Transfer) (ledger.Rec
 
 // replay loads an already-posted transfer. found is false if the id is new.
 func (s *Store) replay(ctx context.Context, id ledger.TransferID, fp [32]byte) (r ledger.Receipt, found bool, err error) {
-	var hash []byte
+	var (
+		hash       []byte
+		status     string
+		rejectCode sql.NullString
+	)
 	err = s.db.QueryRowContext(ctx,
-		`SELECT currency, request_hash, created_at FROM transfers WHERE id = $1`, id,
-	).Scan(&r.Currency, &hash, &r.CreatedAt)
+		`SELECT currency, request_hash, created_at, status, reject_code FROM transfers WHERE id = $1`, id,
+	).Scan(&r.Currency, &hash, &r.CreatedAt, &status, &rejectCode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ledger.Receipt{}, false, nil
 	}
@@ -73,6 +80,9 @@ func (s *Store) replay(ctx context.Context, id ledger.TransferID, fp [32]byte) (
 	}
 	if !bytes.Equal(hash, fp[:]) {
 		return ledger.Receipt{}, true, fmt.Errorf("post transfer %s: %w", id, ledger.ErrIdempotencyConflict)
+	}
+	if status == "rejected" {
+		return ledger.Receipt{}, true, fmt.Errorf("post transfer %s: %w: %w", id, ledger.ErrReplayed, errorForRejectCode(rejectCode.String))
 	}
 
 	rows, err := s.db.QueryContext(ctx,
@@ -137,9 +147,24 @@ func (s *Store) post(ctx context.Context, t ledger.Transfer, fp [32]byte) (_ led
 		return ledger.Receipt{}, fmt.Errorf("post transfer %s: %w", t.ID(), err)
 	}
 
-	postings, err := ledger.Plan(t, accounts, balances)
-	if err != nil {
-		return ledger.Receipt{}, err // already carries the transfer id
+	postings, planErr := ledger.Plan(t, accounts, balances)
+	if planErr != nil {
+		code, final := rejectCodeFor(planErr)
+		if !final {
+			return ledger.Receipt{}, planErr // already carries the transfer id
+		}
+		// Record the refusal under this id and commit it: the outcome of a
+		// transfer id is decided once. A duplicate that was waiting on our
+		// primary key will now replay this refusal instead of re-checking
+		// funds that may have arrived since.
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE transfers SET status = 'rejected', reject_code = $2 WHERE id = $1`, t.ID(), code); err != nil {
+			return ledger.Receipt{}, fmt.Errorf("post transfer %s: record rejection: %w", t.ID(), err)
+		}
+		if err = tx.Commit(); err != nil {
+			return ledger.Receipt{}, fmt.Errorf("post transfer %s: commit rejection: %w", t.ID(), err)
+		}
+		return ledger.Receipt{}, planErr
 	}
 
 	receipt.Entries = make([]ledger.PostedEntry, len(postings))
@@ -224,4 +249,35 @@ func lockAccounts(ctx context.Context, tx *sql.Tx, ids []string) (map[ledger.Acc
 		return nil, nil, fmt.Errorf("lock accounts: %w", err)
 	}
 	return accounts, balances, nil
+}
+
+// rejectCodes lists the refusals that are recorded as the final outcome of
+// a transfer id. Anything else (a database error, a cancelled context) is
+// not an answer about the transfer and is rolled back so it can be retried.
+var rejectCodes = []struct {
+	code string
+	err  error
+}{
+	{"insufficient_funds", ledger.ErrInsufficientFunds},
+	{"account_not_found", ledger.ErrAccountNotFound},
+	{"currency_mismatch", ledger.ErrCurrencyMismatch},
+	{"amount_overflow", ledger.ErrAmountOverflow},
+}
+
+func rejectCodeFor(err error) (string, bool) {
+	for _, rc := range rejectCodes {
+		if errors.Is(err, rc.err) {
+			return rc.code, true
+		}
+	}
+	return "", false
+}
+
+func errorForRejectCode(code string) error {
+	for _, rc := range rejectCodes {
+		if rc.code == code {
+			return rc.err
+		}
+	}
+	return fmt.Errorf("rejected (%s)", code)
 }

@@ -240,3 +240,25 @@ func TestStatusForUnknownErrorIs500(t *testing.T) {
 		t.Fatalf("wrapped domain error not matched: %d", status)
 	}
 }
+
+func TestReplayedRefusalIsFlagged(t *testing.T) {
+	c, _ := seeded(t)
+	body := `{"currency":"VND","from":"alice","to":"bob","amount":5000}`
+
+	first := c.do("POST", "/v1/transfers", body, IdempotencyKeyHeader, "big")
+	if first.Code != http.StatusPaymentRequired || first.Header().Get("Idempotent-Replayed") != "" {
+		t.Fatalf("first: %d %v", first.Code, first.Header())
+	}
+	// Funds arrive, then the client retries the same request.
+	if rec := c.do("POST", "/v1/transfers", `{"currency":"VND","from":"funding","to":"alice","amount":10000}`,
+		IdempotencyKeyHeader, "topup"); rec.Code != http.StatusCreated {
+		t.Fatalf("topup: %d", rec.Code)
+	}
+	retry := c.do("POST", "/v1/transfers", body, IdempotencyKeyHeader, "big")
+	if retry.Code != http.StatusPaymentRequired || retry.Header().Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("retry: %d %v %s", retry.Code, retry.Header(), retry.Body)
+	}
+	if errorCode(t, retry) != "insufficient_funds" {
+		t.Fatalf("code = %s", errorCode(t, retry))
+	}
+}

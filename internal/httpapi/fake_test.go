@@ -26,6 +26,7 @@ type fakeLedger struct {
 type fakeTransfer struct {
 	fp      [32]byte
 	receipt ledger.Receipt
+	refusal error // set when the id's outcome was a refusal
 }
 
 func newFakeLedger() *fakeLedger {
@@ -73,6 +74,9 @@ func (f *fakeLedger) PostTransfer(_ context.Context, t ledger.Transfer) (ledger.
 		if prev.fp != t.Fingerprint() {
 			return ledger.Receipt{}, fmt.Errorf("post transfer %s: %w", t.ID(), ledger.ErrIdempotencyConflict)
 		}
+		if prev.refusal != nil {
+			return ledger.Receipt{}, fmt.Errorf("post transfer %s: %w: %w", t.ID(), ledger.ErrReplayed, prev.refusal)
+		}
 		r := prev.receipt
 		r.Replayed = true
 		return r, nil
@@ -80,6 +84,8 @@ func (f *fakeLedger) PostTransfer(_ context.Context, t ledger.Transfer) (ledger.
 
 	postings, err := ledger.Plan(t, f.accounts, f.balances)
 	if err != nil {
+		// Like the store, a refusal is the final outcome of the id.
+		f.transfers[t.ID()] = fakeTransfer{fp: t.Fingerprint(), refusal: err}
 		return ledger.Receipt{}, err
 	}
 	r := ledger.Receipt{TransferID: t.ID(), Currency: t.Currency(), CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
