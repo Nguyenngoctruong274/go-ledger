@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Nguyenngoctruong274/go-ledger/internal/metrics"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/testdb"
 )
@@ -213,6 +215,47 @@ func TestBackoff(t *testing.T) {
 	for i, w := range want {
 		if got := r.backoff(i + 1); got != w {
 			t.Errorf("backoff(%d) = %v, want %v", i+1, got, w)
+		}
+	}
+}
+
+func TestRelayMetrics(t *testing.T) {
+	db := openTestDB(t)
+	enqueue(t, db, 3)
+	reg := metrics.NewRegistry()
+	rec := &recorder{failOn: map[string]int{"k2": 1}}
+	relay := NewRelay(db, rec, discard(), Options{BaseBackoff: 10 * time.Millisecond, Metrics: NewMetrics(reg, db)})
+
+	scrape := func() string {
+		var b strings.Builder
+		reg.Write(&b)
+		return b.String()
+	}
+	if out := scrape(); !strings.Contains(out, "outbox_pending_messages 3\n") {
+		t.Fatalf("before: %s", out)
+	}
+	if out := scrape(); strings.Contains(out, "outbox_oldest_pending_age_seconds 0\n") ||
+		strings.Contains(out, "outbox_oldest_pending_age_seconds NaN") {
+		t.Fatalf("oldest age should be a positive number while messages wait: %s", out)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for pendingCount(t, db) > 0 && time.Now().Before(deadline) {
+		if _, err := relay.ProcessBatch(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	out := scrape()
+	for _, want := range []string{
+		`outbox_published_total{topic="test"} 3`,
+		`outbox_publish_failures_total{topic="test"} 1`,
+		"outbox_pending_messages 0\n",
+		"outbox_oldest_pending_age_seconds 0\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/httpapi"
+	"github.com/Nguyenngoctruong274/go-ledger/internal/metrics"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/outbox"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/testdb"
@@ -102,13 +103,17 @@ func newStack(t *testing.T) *stack {
 	hookSrv := httptest.NewServer(hook)
 	t.Cleanup(hookSrv.Close)
 
-	api := httptest.NewServer(httpapi.NewHandler(logger, postgres.NewStore(db)))
+	reg := metrics.NewRegistry()
+	postgres.RegisterPoolMetrics(reg, db)
+	api := httptest.NewServer(httpapi.NewHandler(logger, postgres.NewStore(db),
+		httpapi.Options{Metrics: reg, Ready: db.PingContext}))
 	t.Cleanup(api.Close)
 
 	relay := outbox.NewRelay(db,
 		outbox.WebhookPublisher{URL: hookSrv.URL, Secret: []byte(webhookSecret)},
 		logger,
-		outbox.Options{PollInterval: 20 * time.Millisecond, BaseBackoff: 30 * time.Millisecond, MaxBackoff: 200 * time.Millisecond},
+		outbox.Options{PollInterval: 20 * time.Millisecond, BaseBackoff: 30 * time.Millisecond, MaxBackoff: 200 * time.Millisecond,
+			Metrics: outbox.NewMetrics(reg, db)},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
