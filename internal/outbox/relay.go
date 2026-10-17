@@ -41,7 +41,6 @@ type Options struct {
 	PollInterval time.Duration // sleep when there is nothing to do (default 500ms)
 	BaseBackoff  time.Duration // first retry delay, doubled per attempt (default 1s)
 	MaxBackoff   time.Duration // cap on the retry delay (default 5m)
-	Metrics      *Metrics      // optional; see NewMetrics
 }
 
 func (o Options) withDefaults() Options {
@@ -140,7 +139,6 @@ func (r *Relay) ProcessBatch(ctx context.Context) (published int, err error) {
 
 	for i, m := range msgs {
 		if pubErr := r.pub.Publish(ctx, m); pubErr != nil {
-			r.opts.Metrics.onFailure(m.Topic)
 			delay := r.backoff(attempts[i] + 1)
 			r.logger.WarnContext(ctx, "outbox publish failed",
 				slog.Int64("id", m.ID), slog.String("topic", m.Topic),
@@ -164,10 +162,6 @@ func (r *Relay) ProcessBatch(ctx context.Context) (published int, err error) {
 
 	if err = tx.Commit(); err != nil {
 		return 0, fmt.Errorf("outbox: commit: %w", err)
-	}
-	// Count deliveries only once their published_at is durable.
-	for _, m := range msgs[:published] {
-		r.opts.Metrics.onPublished(m.Topic)
 	}
 	return published, nil
 }

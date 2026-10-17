@@ -9,18 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/config"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/httpapi"
-	"github.com/Nguyenngoctruong274/go-ledger/internal/metrics"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/outbox"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/postgres"
 )
-
-var errDraining = errors.New("shutting down")
 
 func main() {
 	if err := run(); err != nil {
@@ -58,18 +54,13 @@ func run() error {
 	}
 	logger.Info("database ready")
 
-	reg := metrics.NewRegistry()
-	metrics.RegisterRuntime(reg)
-	postgres.RegisterPoolMetrics(reg, db)
-
 	// The relay runs until shutdown. It is stopped and awaited before the
 	// database handle is closed (defers run in reverse order).
 	relayCtx, stopRelay := context.WithCancel(context.Background())
 	relayDone := make(chan struct{})
 	go func() {
 		defer close(relayDone)
-		opts := outbox.Options{Metrics: outbox.NewMetrics(reg, db)}
-		_ = outbox.NewRelay(db, newPublisher(cfg, logger), logger, opts).Run(relayCtx)
+		_ = outbox.NewRelay(db, newPublisher(cfg, logger), logger, outbox.Options{}).Run(relayCtx)
 	}()
 	defer func() {
 		stopRelay()
@@ -77,19 +68,9 @@ func run() error {
 		logger.Info("outbox relay stopped")
 	}()
 
-	// Readiness turns false the moment shutdown starts, so load balancers
-	// stop routing new requests here while in-flight ones finish.
-	var draining atomic.Bool
-	ready := func(ctx context.Context) error {
-		if draining.Load() {
-			return errDraining
-		}
-		return db.PingContext(ctx)
-	}
-
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(logger, postgres.NewStore(db), httpapi.Options{Metrics: reg, Ready: ready}),
+		Handler:           httpapi.NewHandler(logger, postgres.NewStore(db)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -108,13 +89,6 @@ func run() error {
 	case <-ctx.Done():
 	}
 
-	draining.Store(true)
-	if cfg.ShutdownDrain > 0 {
-		// Give load balancers time to see /readyz fail before connections
-		// are refused; otherwise in-flight retries hit a closed port.
-		logger.Info("draining", slog.Duration("for", cfg.ShutdownDrain))
-		time.Sleep(cfg.ShutdownDrain)
-	}
 	logger.Info("shutting down", slog.Duration("timeout", cfg.ShutdownTimeout))
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()

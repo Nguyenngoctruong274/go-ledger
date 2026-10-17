@@ -4,13 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/lib/pq"
 
 	"github.com/Nguyenngoctruong274/go-ledger/internal/ledger"
-	"github.com/Nguyenngoctruong274/go-ledger/internal/metrics"
 	"github.com/Nguyenngoctruong274/go-ledger/internal/testdb"
 )
 
@@ -188,19 +186,5 @@ func TestStatementPagination(t *testing.T) {
 
 	if _, err := store.Statement(ctx, "wallet", 0, 0); err == nil {
 		t.Fatal("limit 0 accepted")
-	}
-}
-
-func TestPoolMetrics(t *testing.T) {
-	db := openTestDB(t)
-	reg := metrics.NewRegistry()
-	RegisterPoolMetrics(reg, db)
-	var b strings.Builder
-	reg.Write(&b)
-	out := b.String()
-	for _, want := range []string{"db_pool_max_open_connections 20\n", "db_pool_open_connections ", "db_pool_wait_total "} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in:\n%s", want, out)
-		}
 	}
 }

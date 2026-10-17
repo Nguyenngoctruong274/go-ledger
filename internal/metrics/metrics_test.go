@@ -152,14 +152,3 @@ func BenchmarkCounterInc(b *testing.B) {
 		}
 	})
 }
-
-func TestRegisterRuntime(t *testing.T) {
-	r := NewRegistry()
-	RegisterRuntime(r)
-	out := render(r)
-	for _, name := range []string{"go_goroutines ", "go_heap_inuse_bytes ", "go_gc_cycles_total ", "process_uptime_seconds "} {
-		if !strings.Contains(out, "\n"+name) {
-			t.Errorf("missing %s", name)
-		}
-	}
-}

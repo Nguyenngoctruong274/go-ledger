@@ -123,9 +123,7 @@ Each entry also stores `balance_after`, so replays and account statements show r
 | `GET` | `/v1/accounts/{id}` | Account with current balance |
 | `GET` | `/v1/accounts/{id}/entries?limit=&before=` | Statement, newest first, keyset-paginated via `next_before` |
 | `POST` | `/v1/transfers` | Post a transfer. **Requires `Idempotency-Key`**, which becomes the transfer id |
-| `GET` | `/healthz` | Liveness: the process is up |
-| `GET` | `/readyz` | Readiness: database reachable and not draining (503 otherwise) |
-| `GET` | `/metrics` | Prometheus text format |
+| `GET` | `/healthz` | Liveness |
 
 ```bash
 curl -X POST localhost:8080/v1/transfers \
@@ -190,40 +188,6 @@ Publishers: a **signed webhook** (`X-Ledger-Signature: sha256=HMAC(secret, "<tim
 
 Tests cover the atomic write, in-order delivery, backoff without overtaking, four concurrent relays publishing 300 messages exactly once and in order, graceful stop, and webhook signing, status handling and timeouts.
 
-## Observability
-
-**Logs** are JSON (`log/slog`). Every request gets an `X-Request-Id`: a well-formed incoming one is kept so a single id can follow a call across services, anything else is replaced (which also stops log injection through the header). The id is echoed in the response and appears on the request log line and on any error log for that request.
-
-**Metrics** are served at `/metrics` in the Prometheus text format:
-
-| Metric | Type | Why it exists |
-|---|---|---|
-| `http_requests_total{method,route,status}` | counter | Traffic and error rate. `route` is the pattern (`/v1/accounts/{id}`), never the raw path, so ids cannot explode cardinality. |
-| `http_request_duration_seconds{method,route}` | histogram | Latency SLOs per endpoint |
-| `ledger_transfers_total{outcome}` | counter | `posted`, `replayed`, `rejected`, `conflict`, `invalid`, `error`. A jump in `replayed` means clients are retrying hard; `conflict` means a client bug reusing keys. |
-| `outbox_pending_messages` | gauge | Is the outbox draining? |
-| `outbox_oldest_pending_age_seconds` | gauge | How stale are consumers? The alert for head-of-line blocking. |
-| `outbox_published_total`, `outbox_publish_failures_total` `{topic}` | counter | Delivery and failure rates |
-| `db_pool_*` | gauge / counter | In use vs cap, and how often and how long callers wait for a connection |
-| `go_goroutines`, `go_heap_inuse_bytes`, `go_gc_cycles_total`, `process_uptime_seconds` | gauge / counter | Leaks, memory growth, restarts |
-
-Outbox and pool gauges are read at scrape time (from the database and `sql.DBStats`), so they are correct across restarts and replicas.
-
-Example alerts:
-
-```yaml
-- alert: OutboxStuck            # consumers are falling behind
-  expr: outbox_oldest_pending_age_seconds > 300
-- alert: TransferErrors         # 5xx on the money path
-  expr: rate(ledger_transfers_total{outcome="error"}[5m]) > 0
-- alert: DBPoolSaturated
-  expr: rate(db_pool_wait_total[5m]) > 1
-```
-
-The exposition code is a small in-repo package (`internal/metrics`, under 400 lines, deterministic output tested byte for byte) rather than `prometheus/client_golang`, to keep the module dependency-free apart from the database driver. It implements exactly the counters, gauges and histograms used here.
-
-**Readiness and shutdown.** `/healthz` only says the process is alive. `/readyz` pings the database and turns 503 as soon as SIGTERM arrives. With `LEDGER_SHUTDOWN_DRAIN` set, `ledgerd` keeps serving for that long so load balancers take it out of rotation, then stops accepting connections, finishes in-flight requests, stops the outbox relay and closes the database, in that order.
-
 ## Testing
 
 | Layer | Where | Needs |
@@ -260,7 +224,6 @@ make test-integration  # everything, including the end-to-end suite
 | `LEDGER_HTTP_ADDR` | `:8080` | Listen address |
 | `LEDGER_DATABASE_URL` | – (required) | Postgres connection string |
 | `LEDGER_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
-| `LEDGER_SHUTDOWN_DRAIN` | `0s` | Keep serving with `/readyz` failing this long before closing the listener (use ~5s behind a load balancer) |
 | `LEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LEDGER_OUTBOX_WEBHOOK_URL` | – | Where outbox events are POSTed. Unset: events are logged |
 | `LEDGER_OUTBOX_WEBHOOK_SECRET` | – | HMAC key for webhook signatures (≥ 16 bytes, required with a URL) |
@@ -275,7 +238,7 @@ make test-integration  # everything, including the end-to-end suite
 - [x] Day 6: HTTP API + error mapping
 - [x] Day 7: transactional outbox relay
 - [x] Day 8: end-to-end integration tests (real HTTP + PostgreSQL + outbox + webhook)
-- [x] Day 9: observability (request ids, Prometheus metrics, readiness, drain)
+- [ ] Day 9: observability (slog, Prometheus metrics, readiness)
 - [ ] Day 10: Docker Compose stack, benchmarks, final docs
 
 ## License
