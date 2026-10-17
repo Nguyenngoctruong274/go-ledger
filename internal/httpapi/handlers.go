@@ -241,24 +241,33 @@ func (req postTransferRequest) toTransfer(id ledger.TransferID) (ledger.Transfer
 func (a *api) postTransfer(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get(IdempotencyKeyHeader)
 	if err := checkID(IdempotencyKeyHeader+" header", key); err != nil {
+		a.transfers.Inc("invalid")
 		a.writeError(w, r, err)
 		return
 	}
 	var req postTransferRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		a.transfers.Inc("invalid")
 		a.writeError(w, r, err)
 		return
 	}
 	tr, err := req.toTransfer(ledger.TransferID(key))
 	if err != nil {
+		a.transfers.Inc("invalid")
 		a.writeError(w, r, err)
 		return
 	}
 
 	receipt, err := a.ledger.PostTransfer(r.Context(), tr)
 	if err != nil {
+		a.transfers.Inc(transferOutcome(err))
 		a.writeError(w, r, err)
 		return
+	}
+	if receipt.Replayed {
+		a.transfers.Inc("replayed")
+	} else {
+		a.transfers.Inc("posted")
 	}
 
 	resp := transferResponse{
@@ -278,4 +287,18 @@ func (a *api) postTransfer(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, resp)
+}
+
+// transferOutcome classifies a failed transfer for ledger_transfers_total.
+func transferOutcome(err error) string {
+	switch status, _ := statusFor(err); {
+	case errors.Is(err, ledger.ErrIdempotencyConflict):
+		return "conflict"
+	case status == http.StatusPaymentRequired || status == http.StatusNotFound || status == http.StatusUnprocessableEntity:
+		return "rejected"
+	case status == http.StatusInternalServerError:
+		return "error"
+	default:
+		return "invalid"
+	}
 }

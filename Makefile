@@ -43,6 +43,14 @@ fmt: ## Format code
 up: ## Start local dependencies (Postgres)
 	docker compose up -d
 
+.PHONY: stack
+stack: ## Run the whole system: ledgerd, webhook-sink, PostgreSQL, Prometheus
+	docker compose --profile stack up --build
+
+.PHONY: bench
+bench: ## Run benchmarks (PostgreSQL ones need `make up`)
+	LEDGER_TEST_DATABASE_URL=$(LEDGER_DATABASE_URL) go test -run '^$$' -bench . -benchmem ./internal/...
+
 .PHONY: down
-down: ## Stop local dependencies
-	docker compose down
+down: ## Stop everything started by `make up` or `make stack`
+	docker compose --profile stack down

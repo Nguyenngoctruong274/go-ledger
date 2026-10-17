@@ -1,3 +1,11 @@
+# `docker compose up -d` starts only PostgreSQL, for local development and
+# tests. `docker compose --profile stack up --build` starts the whole system:
+#
+#   ledgerd       http://localhost:8080   API, /metrics, /readyz
+#   webhook-sink  logs every signed event ledgerd publishes
+#   prometheus    http://localhost:9090   scrapes ledgerd every 5s
+#
+# Credentials here are for local use only.
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,6 +22,44 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  ledgerd:
+    profiles: [stack]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      webhook-sink:
+        condition: service_started
+    environment:
+      LEDGER_DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+      LEDGER_OUTBOX_WEBHOOK_URL: http://webhook-sink:9000/events
+      LEDGER_OUTBOX_WEBHOOK_SECRET: local-dev-secret-0123456789
+      LEDGER_SHUTDOWN_DRAIN: 2s
+    ports:
+      - "8080:8080"
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  webhook-sink:
+    profiles: [stack]
+    build: .
+    entrypoint: ["/webhook-sink"]
+    environment:
+      SINK_SECRET: local-dev-secret-0123456789
+    restart: unless-stopped
+
+  prometheus:
+    profiles: [stack]
+    image: prom/prometheus:v2.54.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - ledgerd
 
 volumes:
   pgdata:

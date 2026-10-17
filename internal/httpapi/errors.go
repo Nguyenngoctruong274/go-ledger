@@ -67,6 +67,7 @@ func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	msg := err.Error()
 	if status == http.StatusInternalServerError {
 		a.logger.ErrorContext(r.Context(), "request failed",
+			slog.String("request_id", RequestID(r.Context())),
 			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("error", err))
 		msg = "internal error"
 	}

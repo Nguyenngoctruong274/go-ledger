@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: ledgerd
+    static_configs:
+      - targets: ["ledgerd:8080"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml

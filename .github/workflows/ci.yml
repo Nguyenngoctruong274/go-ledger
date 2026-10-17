@@ -51,3 +51,33 @@ jobs:
       - uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: docker compose --profile stack config -q
+      - name: Build image
+        run: docker build -t go-ledger:ci .
+      - name: Smoke test the full stack
+        run: |
+          docker compose --profile stack up -d --build postgres webhook-sink ledgerd
+          for i in $(seq 1 30); do
+            curl -fsS localhost:8080/readyz && break
+            sleep 2
+          done
+          curl -fsS -X POST localhost:8080/v1/accounts -d '{"id":"funding","currency":"VND","allow_negative":true}'
+          curl -fsS -X POST localhost:8080/v1/accounts -d '{"id":"rider","currency":"VND"}'
+          curl -fsS -X POST localhost:8080/v1/transfers -H 'Idempotency-Key: ci-1' \
+            -d '{"currency":"VND","from":"funding","to":"rider","amount":50000}'
+          for i in $(seq 1 15); do
+            docker compose --profile stack logs webhook-sink | grep -q '"msg":"event"' && exit 0
+            sleep 2
+          done
+          docker compose --profile stack logs
+          exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose --profile stack down -v

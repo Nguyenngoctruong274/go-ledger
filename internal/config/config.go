@@ -15,7 +15,10 @@ type Config struct {
 	HTTPAddr        string
 	DatabaseURL     string
 	ShutdownTimeout time.Duration
-	LogLevel        string
+	// ShutdownDrain is how long to keep serving with /readyz failing before
+	// closing the listener. 0 locally; a few seconds behind a load balancer.
+	ShutdownDrain time.Duration
+	LogLevel      string
 
 	// OutboxWebhookURL receives outbox events when set; otherwise they are logged.
 	OutboxWebhookURL    string
@@ -65,6 +68,15 @@ func load(getenv func(string) string) (Config, error) {
 		}
 		if len(cfg.OutboxWebhookSecret) < 16 {
 			errs = append(errs, errors.New("LEDGER_OUTBOX_WEBHOOK_SECRET: required with a webhook URL, at least 16 bytes"))
+		}
+	}
+
+	if raw := getenv("LEDGER_SHUTDOWN_DRAIN"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			errs = append(errs, errors.New("LEDGER_SHUTDOWN_DRAIN: must be a non-negative duration"))
+		} else {
+			cfg.ShutdownDrain = d
 		}
 	}
 

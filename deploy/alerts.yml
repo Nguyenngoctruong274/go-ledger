@@ -1,0 +1,23 @@
+groups:
+  - name: ledgerd
+    rules:
+      - alert: OutboxStuck
+        expr: outbox_oldest_pending_age_seconds > 300
+        for: 2m
+        annotations:
+          summary: Outbox events have waited more than 5 minutes; check outbox.last_error.
+      - alert: TransferErrors
+        expr: rate(ledger_transfers_total{outcome="error"}[5m]) > 0
+        for: 5m
+        annotations:
+          summary: Transfers are failing with internal errors.
+      - alert: DBPoolSaturated
+        expr: rate(db_pool_wait_total[5m]) > 1
+        for: 10m
+        annotations:
+          summary: Requests are queueing for database connections.
+      - alert: LedgerNotReady
+        expr: up{job="ledgerd"} == 0
+        for: 1m
+        annotations:
+          summary: ledgerd is not being scraped.

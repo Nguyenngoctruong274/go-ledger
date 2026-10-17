@@ -18,7 +18,7 @@ type client struct {
 }
 
 func newClient(t *testing.T, l Ledger) *client {
-	return &client{t: t, h: NewHandler(discardLogger(), l)}
+	return &client{t: t, h: NewHandler(discardLogger(), l, Options{})}
 }
 
 func (c *client) do(method, path, body string, headers ...string) *httptest.ResponseRecorder {
