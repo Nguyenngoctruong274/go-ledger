@@ -8,6 +8,7 @@
 ![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Release](https://img.shields.io/github/v/release/Nguyenngoctruong274/go-ledger)
 
 </div>
 
@@ -15,29 +16,79 @@
 
 Every product that moves money (ride-hailing wallets, e-commerce refunds, loyalty points) eventually hits the same bugs: balances that drift, a retried request that charges twice, an event that never reaches downstream services. `go-ledger` is a compact, production-style service that solves those problems explicitly.
 
-## Design goals
+## What it solves
 
-| Problem | Approach |
-|---|---|
-| Balances drift | Double-entry bookkeeping: every transfer writes entries that sum to zero, enforced in one constructor |
-| Concurrent transfers corrupt balances | Postgres transactions with row locks taken in a deterministic order (no deadlocks) |
-| Client retries charge twice | `Idempotency-Key` stored in the same transaction as the entries |
-| Events lost on crash | Transactional outbox + relay |
-| Floating-point money | `int64` minor units only |
+| Problem | Approach | Proof |
+|---|---|---|
+| Balances drift | Double-entry: every transfer's entries sum to zero, enforced in Go and by a database trigger | [fuzz test](internal/ledger/transfer_test.go), [schema](internal/postgres/migrations/0001_init.sql) |
+| Concurrent transfers deadlock or corrupt balances | Row locks taken in ascending account id order | 100 opposite-direction transfers, no deadlock ([test](internal/postgres/transfer_test.go)) |
+| Client retries charge twice | Transfer id is the idempotency key with exactly one stored outcome | 20 identical concurrent requests post once; copies racing with top-ups always agree |
+| Events lost or announced for rolled-back transfers | Transactional outbox + ordered relay + signed webhooks | webhook outage test: every event arrives once, in order |
+| Can't tell what it's doing in production | Request ids, Prometheus metrics, readiness with drain | [end-to-end metrics test](test/integration/observability_test.go) |
+| Floating-point money | `int64` minor units only | — |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     C[Client] -->|HTTP JSON| API[internal/httpapi]
-    API --> SVC[internal/ledger<br/>domain + service]
-    SVC -->|Store interface| PG[(internal/postgres)]
-    PG --> DB[(PostgreSQL)]
-    DB --> OB[internal/outbox relay]
-    OB -->|signed webhook| MQ[[Consumers]]
+    API -->|validate| DOM[internal/ledger<br/>domain rules]
+    API -->|Ledger interface| ST[internal/postgres<br/>store]
+    ST -->|Plan| DOM
+    ST --> DB[(PostgreSQL)]
+    DB --> OB[internal/outbox<br/>relay]
+    OB -->|signed webhook| MQ[[Consumers<br/>e.g. cmd/webhook-sink]]
+    PR[(Prometheus)] -->|scrape /metrics| API
 ```
 
-Packages are organized by responsibility, not by layer. The `ledger` package owns the business rules and defines the `Store` interface it needs; `postgres` implements it.
+Packages are organized by responsibility, not by layer. `ledger` holds the rules (balanced transfers, funds checks) and has no I/O. `postgres` applies them inside transactions. `httpapi` defines the small `Ledger` interface it needs, so handlers are tested against an in-memory fake, and `outbox` delivers events independently of request handling.
+
+## Quick start
+
+Run the whole system (needs Docker):
+
+```bash
+make stack   # docker compose --profile stack up --build
+```
+
+| Service | Where | What it does |
+|---|---|---|
+| `ledgerd` | http://localhost:8080 | API, `/metrics`, `/readyz` |
+| `webhook-sink` | logs | Reference consumer: verifies signatures and timestamps, ignores duplicate deliveries, logs each event |
+| `prometheus` | http://localhost:9090 | Scrapes `ledgerd` every 5 s, loads the alert rules in `deploy/alerts.yml` |
+| `postgres` | localhost:5432 | Database |
+
+Then:
+
+```bash
+curl -X POST localhost:8080/v1/accounts -d '{"id":"funding","currency":"VND","allow_negative":true}'
+curl -X POST localhost:8080/v1/accounts -d '{"id":"rider","currency":"VND"}'
+curl -X POST localhost:8080/v1/transfers -H 'Idempotency-Key: demo-1' \
+  -d '{"currency":"VND","from":"funding","to":"rider","amount":50000}'
+docker compose --profile stack logs webhook-sink   # the signed transfer.posted event
+```
+
+For development, run only the database and the service on the host:
+
+```bash
+make up                # PostgreSQL only
+make run               # ledgerd on :8080 (applies migrations)
+make test              # unit tests, no database needed
+make test-integration  # everything, including the end-to-end suite
+make bench             # benchmarks
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `LEDGER_HTTP_ADDR` | `:8080` | Listen address |
+| `LEDGER_DATABASE_URL` | – (required) | Postgres connection string |
+| `LEDGER_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
+| `LEDGER_SHUTDOWN_DRAIN` | `0s` | Keep serving with `/readyz` failing this long before closing the listener (use ~5s behind a load balancer) |
+| `LEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LEDGER_OUTBOX_WEBHOOK_URL` | – | Where outbox events are POSTed. Unset: events are logged |
+| `LEDGER_OUTBOX_WEBHOOK_SECRET` | – | HMAC key for webhook signatures (≥ 16 bytes, required with a URL) |
 
 ## Domain model
 
@@ -245,25 +296,46 @@ Every test gets its own PostgreSQL schema (`internal/testdb`), so tests run in p
 
 The roadmap originally named Testcontainers. The CI service container already gives each run a clean, disposable PostgreSQL, and per-test schemas give isolation within a run, so the suite does not need the Docker API.
 
-## Quick start
+## Benchmarks
 
-```bash
-make up       # start Postgres
-make run      # start ledgerd on :8080 (applies migrations)
-curl -X POST localhost:8080/v1/accounts -d '{"id":"alice","currency":"VND"}'
-make test-db           # unit + PostgreSQL tests
-make test-integration  # everything, including the end-to-end suite
-```
+`make bench`. Numbers from one run on a 2 vCPU cloud container with PostgreSQL 16 on the same host, default settings (`shared_buffers=128MB`, `synchronous_commit=on`). They show the shape of the costs rather than production capacity.
 
-| Variable | Default | Description |
+| Benchmark | Time per op | Throughput |
 |---|---|---|
-| `LEDGER_HTTP_ADDR` | `:8080` | Listen address |
-| `LEDGER_DATABASE_URL` | – (required) | Postgres connection string |
-| `LEDGER_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
-| `LEDGER_SHUTDOWN_DRAIN` | `0s` | Keep serving with `/readyz` failing this long before closing the listener (use ~5s behind a load balancer) |
-| `LEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `LEDGER_OUTBOX_WEBHOOK_URL` | – | Where outbox events are POSTed. Unset: events are logged |
-| `LEDGER_OUTBOX_WEBHOOK_SECRET` | – | HMAC key for webhook signatures (≥ 16 bytes, required with a URL) |
+| `NewTransfer` (3 legs) | 153 ns, 1 alloc | — |
+| `Fingerprint` (3 legs) | 760 ns | — |
+| `Plan` (2 / 10 legs) | 108 / 481 ns | — |
+| `PostTransfer` serial | 2.5 ms | ~400 /s |
+| `PostTransfer` 8 goroutines, disjoint accounts | 0.95 ms | ~1,050 /s |
+| `PostTransfer` 8 goroutines, one hot account | 2.2 ms | ~460 /s |
+| `PostTransfer` replay of a posted id | 0.41 ms | ~2,450 /s |
+
+What they say:
+
+- The domain layer costs well under a microsecond, so nearly all of a transfer's time is the database round trips and the commit's WAL flush.
+- Disjoint transfers scale with concurrency because their row locks never meet.
+- Transfers that share one account are serialised by its row lock and stay around single-connection speed however many clients there are. A busy platform-fee account would hit this first. The usual fix is to split it into N sub-accounts and sum them for reporting.
+- Retries are about 6x cheaper than first posts because they read the stored result and take no locks.
+
+## Design decisions
+
+| Decision | Alternative | Why |
+|---|---|---|
+| Balances stored on the account row, updated in the same transaction as the entries | Sum entries on read | O(1) balance reads and a cheap overdraft `CHECK`. Entries stay the source of truth, and tests assert the two always agree. |
+| Pessimistic row locks in ascending id order | Optimistic versioning with retries | Contended wallets would retry endlessly under optimistic locking. A global lock order removes deadlocks instead of retrying through them. |
+| Transfer id = idempotency key, one stored outcome per id (posted **or** rejected) | Separate idempotency table with TTL | One unique index enforces both "post once" and "answer the same way every time". Ledger ids never expire. |
+| Ledger rules enforced twice: in Go and in PostgreSQL (zero-sum trigger, overdraft check, append-only entries) | Trust the application | A bug, a manual SQL fix or a future second writer still cannot unbalance the books. |
+| Transactional outbox, one relay publishing in id order | Publish to a broker inside the request | Never lose an event or announce a rolled-back transfer. Strict order keeps per-account balances monotonic for consumers, at the cost of head-of-line blocking, which is measured and alerted on. |
+| `database/sql` + `lib/pq`, in-repo metrics package | `pgx`, `prometheus/client_golang` | Zero transitive dependencies (the build environment blocked several module hosts). Both are small, tested and replaceable behind existing interfaces. |
+| Integration tests on a schema per test against one PostgreSQL | Testcontainers | Same isolation without needing the Docker API in every test run; CI provides the database as a service container. |
+
+## Limitations and next steps
+
+- **No authentication or authorization.** Run it behind a gateway that authenticates callers and decides who may move money from which account.
+- **Single currency per transfer.** FX would be two linked transfers through a conversion account.
+- **Hot accounts serialise** (see Benchmarks). Sub-account sharding is the next step for very busy accounts.
+- **Outbox rows are never deleted.** A periodic job should archive published rows.
+- **Webhook-only publisher.** A Kafka publisher only needs to implement `outbox.Publisher`.
 
 ## Roadmap
 
@@ -276,7 +348,7 @@ make test-integration  # everything, including the end-to-end suite
 - [x] Day 7: transactional outbox relay
 - [x] Day 8: end-to-end integration tests (real HTTP + PostgreSQL + outbox + webhook)
 - [x] Day 9: observability (request ids, Prometheus metrics, readiness, drain)
-- [ ] Day 10: Docker Compose stack, benchmarks, final docs
+- [x] Day 10: Docker Compose stack, benchmarks, final docs, v1.0.0
 
 ## License
 
